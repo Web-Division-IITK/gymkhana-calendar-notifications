@@ -1,5 +1,4 @@
 const admin = require('firebase-admin');
-const auth = require('firebase-admin/auth');
 // const dblib = require('firebase-admin/database');
 const serviceAccount = require("./creds.json");
 const express = require('express');
@@ -199,7 +198,17 @@ function setEventAlarms() {
 	//sets timeouts for aforementioned events as well as the next hour
 	for (const [event, {name, time}] of Object.entries(eventkeys)) {
 		const time_dist = time - Date.now();
-		if (time_dist < 0) continue;
+		if (time_dist < 0) {
+			//clear out events that have already occurred
+			console.log(`Culling ${event}`);
+			for (const user of Object.keys(userwise)) {
+				delete userwise[user][event];
+			}
+			delete notifwise[event];
+			notifs.child(event).remove(() => {});
+			delete eventkeys[event];
+			continue;
+		}
 		if (time_dist > 1000*60*96) continue; //event is more than 95 minutes away (1 minute leeway) -> take no action, everything handled on next hour
 		console.log(`Setting timeout for event key ${event} taking place at ${time}`);
 		deleteAlarms(event);
