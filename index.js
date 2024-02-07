@@ -217,16 +217,16 @@ function setEventAlarms() {
 		if (time_dist > 1000*60*60) {
 			//more than an hour away -> set timeout for 30 minutes before notification only
 			console.log("More than an hour away");
-			addAlarm(event, time - 1000*60*30, sendNotifications.bind(this, snapshot.key, thirtyMin(name)));
+			addAlarm(event, time - 1000*60*30, sendNotifications.bind(this, event, thirtyMin(name)));
 		} else if (time_dist > 1000*60*30) {
 			//between 30 minutes and an hour away -> set timeout for 30 minutes before and 5 minutes before notifications
 			console.log("More than 30 minutes away");
-			addAlarm(event, time - 1000*60*30, sendNotifications.bind(this, snapshot.key, thirtyMin(name)));
-			addAlarm(event, time - 1000*60*5, sendNotifications.bind(this, snapshot.key, fiveMin(name)));
+			addAlarm(event, time - 1000*60*30, sendNotifications.bind(this, event, thirtyMin(name)));
+			addAlarm(event, time - 1000*60*5, sendNotifications.bind(this, event, fiveMin(name)));
 		} else {
 			//less than 30 minutes away -> only set timeout for 5 minutes before notification
 			console.log("Less than 30 minutes away");
-			addAlarm(event, time - 1000*60*5, sendNotifications.bind(this, snapshot.key, fiveMin(name)));
+			addAlarm(event, time - 1000*60*5, sendNotifications.bind(this, event, fiveMin(name)));
 		}
 	}
 }
