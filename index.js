@@ -326,6 +326,23 @@ server.post("/unsubscribeFromEvent", bodyparser.json({type: "*/*"}), async (req,
 	res.status(200).json({"error":"None"});
 });
 
+server.post("/test", bodyparser.json({type: "*/*"}), async (req, res) => {
+	//test endpoint for sending notifications
+	if (req.body.pass !== process.env.PASS) {
+		res.status(404).send("Cannot POST /test");
+		return;
+	}
+	console.log("debug send called for ", req.body.id);
+	const resp = msg.send({
+		notification: {
+			title:"Test",
+			body:"Test message"
+		},
+		token: req.body.id
+	});
+	res.status(200).json(resp);
+});
+
 server.listen(port, () => {
 	console.log(`Notifications server started on port ${port}`);
 });
