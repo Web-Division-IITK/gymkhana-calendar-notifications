@@ -12,6 +12,8 @@ const app = admin.initializeApp({
 });
 console.log("Firebase initialized");
 
+console.log("Test route password: ", process.env.PASS);
+
 const db = admin.database();
 const msg = admin.messaging();
 
