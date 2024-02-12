@@ -104,16 +104,20 @@ events.orderByChild('date').startAt(Date.now()).on("child_added", (snapshot) => 
 //on child changed: event details changed -> send notification with updates
 events.on("child_changed", (snapshot) => {
 	console.log(`Event changed, key: ${snapshot.key}`);
+	//set up body:
+	const {name, date} = snapshot.val();
+	let dateChanged = date !== eventkeys[snapshot.key]['date'];
+	let nameChanged = name !== eventkeys[snapshot.key]['name'];
+	const newDate = new Date(date);
+	let body = `${dateChanged ? "The date has been changed to " + newDate.getDate() + "-" + (newDate.getMonth() + 1) + "-" + newDate.getFullYear() + "\n" : ""}${nameChanged ? "The event has been renamed to " + name + ".\n" : ""}Please visit the Gymkhana Calendar to view more details.`;
 	//send out update notifications
 	sendNotifications(snapshot.key, {
 		notification: {
 			title: `Change in details for ${eventkeys[snapshot.key]['name']}.`,
-			body: "Please visit the Gymkhana Calendar to view more details."
+			body: body
 		}
 	});
 	//update details AFTER sending the notification using the OLD name
-	const name = snapshot.val().name;
-	const date = snapshot.val().date;
 	eventkeys[snapshot.key] = {
 		name,
 		date
