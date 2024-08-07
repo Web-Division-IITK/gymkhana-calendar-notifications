@@ -5,6 +5,127 @@ const express = require('express');
 const cors = require('cors');
 const bodyparser = require('body-parser');
 
+function thirtyMin(name) {
+	return {
+		notification: {
+			title: `${name} will begin in 30 minutes.`,
+			body: "Please visit the Gymkhana Calendar to view more details"
+		}
+	}
+}
+
+function fiveMin(name) {
+	return {
+		notification: {
+			title: `${name} will begin in 5 minutes!`,
+			body: "Please visit the Gymkhana Calendar to view more details"
+		}
+	}
+}
+
+function addAlarm(key, time, callback) {
+	console.log(`Alarm being set for ${key}, will go off in ~${Math.round((time - Date.now())/(1000*60))} minutes`)
+	if (timeouts[key] === undefined) { //new event/deleteAlarms was called
+		timeouts[key] = [setTimeout(callback, time - Date.now())];
+	} else {
+		timeouts[key] = [...timeouts[key], setTimeout(callback, time - Date.now())];
+	}
+}
+
+function deleteAlarms(key) {
+	if (!Array.isArray(timeouts[key])) {
+		console.log(`deleteAlarms called on ${key} which has no timers`);
+		return;
+	}
+	for (const alarm of timeouts[key]) {
+		clearTimeout(alarm);
+	}
+	delete timeouts[key];
+}
+
+async function sendNotifications(key, message) {
+	console.log(`Sending notifications now for event ${key}`);
+	console.log(notifwise[key]);
+	if (notifwise[key] === undefined || notifwise[key].length === 0) {
+		console.log(`No subscribers for ${key}, so no notifications were sent`);
+		return;
+	}
+	let allTokens = Object.keys(notifwise[key]);
+	for (let i = 0; i < Math.trunc(allTokens.length/500) + 1; i++) {
+		console.log("Sending batch of messages...");
+		let tokensArr = allTokens.slice(i*500, i*500+500);
+		console.log("Tokens array: ", tokensArr);
+		try {
+			const resp = await msg.sendEachForMulticast({
+				...message,
+				tokens: tokensArr
+			});
+			console.log(`Successful sends: ${resp.successCount}, total: ${tokensArr.length}`);
+		} catch (err) {
+			console.log(`Error in sending messages for ${key}`);
+			console.log(err);
+		}
+	}
+}
+
+//set up setTimeouts for events or 30min. reminders in the coming hour, this is done every hour
+function setEventAlarms() {
+	console.log(`Setting timeouts, current Date.now(): ${Date.now()}`);
+	//sets timeouts for aforementioned events as well as the next hour
+	for (const [event, {name, time}] of Object.entries(eventkeys)) {
+		const time_dist = time - Date.now();
+		if (time_dist < 0) {
+			//clear out events that have already occurred
+			console.log(`Culling ${event}`);
+			for (const user of Object.keys(userwise)) {
+				delete userwise[user][event];
+			}
+			delete notifwise[event];
+			notifs.child(event).remove(() => {});
+			delete eventkeys[event];
+			continue;
+		}
+		if (time_dist > 1000*60*96) continue; //event is more than 95 minutes away (1 minute leeway) -> take no action, everything handled on next hour
+		console.log(`Setting timeout for event key ${event} taking place at ${time}`);
+		deleteAlarms(event);
+		if (time_dist > 1000*60*60) {
+			//more than an hour away -> set timeout for 30 minutes before notification only
+			console.log("More than an hour away");
+			addAlarm(event, time - 1000*60*30, sendNotifications.bind(this, event, thirtyMin(name)));
+		} else if (time_dist > 1000*60*30) {
+			//between 30 minutes and an hour away -> set timeout for 30 minutes before and 5 minutes before notifications
+			console.log("More than 30 minutes away");
+			addAlarm(event, time - 1000*60*30, sendNotifications.bind(this, event, thirtyMin(name)));
+			addAlarm(event, time - 1000*60*5, sendNotifications.bind(this, event, fiveMin(name)));
+		} else {
+			//less than 30 minutes away -> only set timeout for 5 minutes before notification
+			console.log("Less than 30 minutes away");
+			addAlarm(event, time - 1000*60*5, sendNotifications.bind(this, event, fiveMin(name)));
+		}
+	}
+}
+
+async function subscribeUser(userid, eventkey) {
+	//assumes valid userid
+	if (notifwise[eventkey] === undefined) notifwise[eventkey] = {[userid]: true};
+	else notifwise[eventkey][userid] = true;
+	if (userwise[userid] === undefined) userwise[userid] = {[eventkey]: true};
+	else userwise[userid][eventkey] = true;
+	await notifs.update({
+		[`${eventkey}/${userid}`]: true
+	});
+}
+
+async function unsubscribeUser(userid, eventkey) {
+	if (notifwise[eventkey] === undefined) throw new Error("Invalid event");
+	if (userwise[userid] === undefined) throw new Error("Data mismatch");
+	delete notifwise[eventkey][userid];
+	delete userwise[userid][eventkey];
+	await notifs.update({
+		[`${eventkey}/${userid}`]: null
+	});
+}
+
 console.log("Initializing firebase app...");
 const app = admin.initializeApp({
   credential: admin.credential.cert(serviceAccount),
@@ -30,6 +151,9 @@ notifs
 const notifs = db.ref("notifications");
 const events = db.ref("approved");
 
+const server = express();
+const port = process.env.NODE_PORT || 6001;
+
 let notifwise = {};
 let userwise = {};
 
@@ -39,24 +163,6 @@ let eventkeys = {};
 
 //for storing timeout ids of events
 let timeouts = {};
-
-function thirtyMin(name) {
-	return {
-		notification: {
-			title: `${name} will begin in 30 minutes.`,
-			body: "Please visit the Gymkhana Calendar to view more details"
-		}
-	}
-}
-
-function fiveMin(name) {
-	return {
-		notification: {
-			title: `${name} will begin in 5 minutes!`,
-			body: "Please visit the Gymkhana Calendar to view more details"
-		}
-	}
-}
 
 console.log("Fetching notifs data...");
 notifs.once("value", (snapshot) => {
@@ -153,113 +259,7 @@ events.on("child_removed", async (snapshot) => {
 	await notifs.child(snapshot.key).remove(() => {});
 });
 
-function addAlarm(key, time, callback) {
-	console.log(`Alarm being set for ${key}, will go off in ~${Math.round((time - Date.now())/(1000*60))} minutes`)
-	if (timeouts[key] === undefined) { //new event/deleteAlarms was called
-		timeouts[key] = [setTimeout(callback, time - Date.now())];
-	} else {
-		timeouts[key] = [...timeouts[key], setTimeout(callback, time - Date.now())];
-	}
-}
-
-function deleteAlarms(key) {
-	if (!Array.isArray(timeouts[key])) {
-		console.log(`deleteAlarms called on ${key} which has no timers`);
-		return;
-	}
-	for (const alarm of timeouts[key]) {
-		clearTimeout(alarm);
-	}
-	delete timeouts[key];
-}
-
-async function sendNotifications(key, message) {
-	console.log(`Sending notifications now for event ${key}`);
-	console.log(notifwise[key]);
-	if (notifwise[key] === undefined || notifwise[key].length === 0) {
-		console.log(`No subscribers for ${key}, so no notifications were sent`);
-		return;
-	}
-	let allTokens = Object.keys(notifwise[key]);
-	for (let i = 0; i < Math.trunc(allTokens.length/500) + 1; i++) {
-		console.log("Sending batch of messages...");
-		let tokensArr = allTokens.slice(i*500, i*500+500);
-		console.log("Tokens array: ", tokensArr);
-		try {
-			const resp = await msg.sendEachForMulticast({
-				...message,
-				tokens: tokensArr
-			});
-			console.log(`Successful sends: ${resp.successCount}, total: ${tokensArr.length}`);
-		} catch (err) {
-			console.log(`Error in sending messages for ${key}`);
-			console.log(err);
-		}
-	}
-}
-
-//set up setTimeouts for events or 30min. reminders in the coming hour, this is done every hour
-function setEventAlarms() {
-	console.log(`Setting timeouts, current Date.now(): ${Date.now()}`);
-	//sets timeouts for aforementioned events as well as the next hour
-	for (const [event, {name, time}] of Object.entries(eventkeys)) {
-		const time_dist = time - Date.now();
-		if (time_dist < 0) {
-			//clear out events that have already occurred
-			console.log(`Culling ${event}`);
-			for (const user of Object.keys(userwise)) {
-				delete userwise[user][event];
-			}
-			delete notifwise[event];
-			notifs.child(event).remove(() => {});
-			delete eventkeys[event];
-			continue;
-		}
-		if (time_dist > 1000*60*96) continue; //event is more than 95 minutes away (1 minute leeway) -> take no action, everything handled on next hour
-		console.log(`Setting timeout for event key ${event} taking place at ${time}`);
-		deleteAlarms(event);
-		if (time_dist > 1000*60*60) {
-			//more than an hour away -> set timeout for 30 minutes before notification only
-			console.log("More than an hour away");
-			addAlarm(event, time - 1000*60*30, sendNotifications.bind(this, event, thirtyMin(name)));
-		} else if (time_dist > 1000*60*30) {
-			//between 30 minutes and an hour away -> set timeout for 30 minutes before and 5 minutes before notifications
-			console.log("More than 30 minutes away");
-			addAlarm(event, time - 1000*60*30, sendNotifications.bind(this, event, thirtyMin(name)));
-			addAlarm(event, time - 1000*60*5, sendNotifications.bind(this, event, fiveMin(name)));
-		} else {
-			//less than 30 minutes away -> only set timeout for 5 minutes before notification
-			console.log("Less than 30 minutes away");
-			addAlarm(event, time - 1000*60*5, sendNotifications.bind(this, event, fiveMin(name)));
-		}
-	}
-}
-
 setInterval(setEventAlarms, 1000*60*60); //every hour
-
-const server = express();
-const port = process.env.PORT || 6001;
-
-async function subscribeUser(userid, eventkey) {
-	//assumes valid userid
-	if (notifwise[eventkey] === undefined) notifwise[eventkey] = {[userid]: true};
-	else notifwise[eventkey][userid] = true;
-	if (userwise[userid] === undefined) userwise[userid] = {[eventkey]: true};
-	else userwise[userid][eventkey] = true;
-	await notifs.update({
-		[`${eventkey}/${userid}`]: true
-	});
-}
-
-async function unsubscribeUser(userid, eventkey) {
-	if (notifwise[eventkey] === undefined) throw new Error("Invalid event");
-	if (userwise[userid] === undefined) throw new Error("Data mismatch");
-	delete notifwise[eventkey][userid];
-	delete userwise[userid][eventkey];
-	await notifs.update({
-		[`${eventkey}/${userid}`]: null
-	});
-}
 
 server.use(cors());
 

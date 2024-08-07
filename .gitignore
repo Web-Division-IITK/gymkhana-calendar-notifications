@@ -1,2 +1,5 @@
-creds.json
-node_modules
+**/creds.json
+**/node_modules
+**/nginx/certs
+.DS_Store
+**/.DS_Store
