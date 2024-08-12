@@ -1,6 +1,6 @@
 const admin = require('firebase-admin');
 // const dblib = require('firebase-admin/database');
-const serviceAccount = require("./creds.json");
+const serviceAccount = require("/run/secrets/firebase");
 const express = require('express');
 const cors = require('cors');
 const bodyparser = require('body-parser');

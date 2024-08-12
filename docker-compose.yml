@@ -5,11 +5,25 @@ services:
     ports:
       - '6379:6379'
   nginx:
-    build: ./nginx
+    image: 'nginx:latest'
+    restart: always
     ports:
       - '80:80'
       - '443:443'
+    volumes:
+      - ./nginx/:/etc/nginx/conf.d/:ro
+      - ./certbot/www/:/var/www/certbot/:ro
+  certbot:
+    image: 'certbot/cerbot:latest'
+    volumes:
+      - ./certbot/www/:/var/www/certbot/:rw
+      - ./certbot/conf/:/etc/letsencrypt/:rw
   node:
     build: ./node
     ports:
       - '3000:3000'
+    secrets:
+      - firebase
+secrets:
+  firebase:
+    file:./creds.json
