@@ -1,6 +1,8 @@
+(async function() {
 const admin = require('firebase-admin');
 // const dblib = require('firebase-admin/database');
-const serviceAccount = require("/run/secrets/firebase");
+const serviceAccount = require("/run/secrets/firebase.json");
+// const serviceAccount = require("../creds.json");
 const express = require('express');
 const cors = require('cors');
 const bodyparser = require('body-parser');
@@ -46,11 +48,21 @@ function deleteAlarms(key) {
 
 async function sendNotifications(key, message) {
 	console.log(`Sending notifications now for event ${key}`);
-	if (await redisClient.sCard(`event:${key}`) === 0) {
+	if (await redisClient.sCard(`event-users:${key}`) === 0) {
 		console.log(`No subscribers for ${key}, so no notifications were sent`);
 		return;
 	}
-	for await (const tokensArr of redisClient.sScanIterator(`event:${key}`, {COUNT: 500})) {
+	console.log("Getting tokens...");
+	let tokenScan = {cursor: 0};
+	let notified = {};
+	while (true) {
+	    tokenScan = await redisClient.sScan(`event-users:${key}`, tokenScan.cursor, {COUNT: 500});
+	    //this needs to be done according to docs
+	    //TODO: replace with https://github.com/ronomon/deduplication or something similar
+	    let tokensArr = tokenScan.members.filter(el => notified[el] === undefined);
+	    for (const user in tokensArr) {
+	        notified[user] = true;
+	    }
 		console.log("Sending batch of messages...");
 		console.log("Tokens array: ", tokensArr);
 		try {
@@ -63,6 +75,7 @@ async function sendNotifications(key, message) {
 			console.log(`Error in sending messages for ${key}`);
 			console.log(err);
 		}
+		if (tokenScan.cursor === 0) break;
 	}
 }
 
@@ -72,7 +85,7 @@ async function setEventAlarms() {
 	const events = await redisClient.ft.search("idx:event", `@date: [-inf ${Date.now() + 1000*60*96}]]`, {LIMIT: {from: 0, size: 100000}});
 	for (const {id: eventRedisKey, value: {name, date}} of events.documents) {
 		const time_dist = date - Date.now();
-		const event = eventRedisKey.slice("event:".length);
+		const event = eventRedisKey.slice("event-data:".length);
 		if (time_dist < 0) {
 			//clear out events that have already occurred
 			console.log(`Culling ${event}`);
@@ -107,7 +120,7 @@ async function setEventAlarms() {
 async function subscribeUser(userid, eventkey) {
 	//assumes valid userid, valid eventkey, should have been validated earlier
 	await redisClient.multi()
-	    .sAdd(`event:${eventkey}`, userid)
+	    .sAdd(`event-users:${eventkey}`, userid)
 	    .sAdd(`user:${userid}`, eventkey)
 	    .exec();
 }
@@ -116,17 +129,17 @@ async function unsubscribeUser(userid, eventkey) {
 	if ((await redisClient.sIsMember("eventkeys", eventkey)) === 0) throw new Error("Invalid event");
 	if ((await redisClient.exists(userid)) === 0) throw new Error("Data mismatch");
 	await redisClient.multi()
-	    .sRem(`event:${eventkey}`, userid)
+	    .sRem(`event-users:${eventkey}`, userid)
 	    .sRem(`user:${userid}`, eventkey)
 	    .exec();
 }
 
-function async newEvent(snapshot) {
+async function newEvent(snapshot) {
     console.log(`New event approved, key: ${snapshot.key}`);
 	const name = snapshot.val().name;
 	const date = snapshot.val().date;
 	await redisClient.multi()
-	    .hSet(`event:${snapshot.key}`, {name, date})
+	    .hSet(`event-data:${snapshot.key}`, {name, date})
 	    .sAdd("eventkeys", snapshot.key)
         .exec();
 	
@@ -143,7 +156,12 @@ function async newEvent(snapshot) {
 async function changedEvent(snapshot) {
     console.log(`Event changed, key: ${snapshot.key}`);
 	const {name, date} = snapshot.val();
-	const {name: old_name, date: old_date} = await redisClient.hGetAll(snapshot.key);
+	const old_event = await redisClient.hGetAll(snapshot.key);
+	if (old_event === null) {
+	    console.log("Event not present or didn't have subscribers")
+	    return;
+	}
+	const {name: old_name, date: old_date} = old_event
 	let dateChanged = date !== old_name;
 	let nameChanged = name !== old_date;
 	const newDate = new Date(date);
@@ -155,7 +173,7 @@ async function changedEvent(snapshot) {
 		}
 	});
 	if (!(nameChanged || dateChanged)) return;
-	await redisClient.hSet(`event:${snapshot.key}`, {name, date});
+	await redisClient.hSet(`event-data:${snapshot.key}`, {name, date});
 	//clear timeout and set new one if necessary (using new start time, new name)
     deleteAlarms(snapshot.key);
     const time_dist = date - Date.now();
@@ -170,22 +188,24 @@ async function changedEvent(snapshot) {
 async function removedEvent(snapshot) {
     console.log(`Event cancelled, key: ${snapshot.key}`);
 	//send out cancellation notifications
-	const name = await redisClient.hGet(`event:${snapshot.key}`, name);
-	sendNotifications(snapshot.key, {
-		notification: {
-			title: `${name} has been cancelled.`,
-			body: "We are sorry for the inconvenience caused."
-		}
-	});
+	const name = await redisClient.hGet(`event-data:${snapshot.key}`, 'name');
+	if (name !== null) {
+        sendNotifications(snapshot.key, {
+            notification: {
+                title: `${name} has been cancelled.`,
+                body: "We are sorry for the inconvenience caused."
+            }
+        });
+    }
 }
 
-async getSubscribedEvents(req, res) {
+async function getSubscribedEvents(req, res) {
     let userid = req.query.id;
     if (userid === undefined) {
 		res.status(404).json([]);
 		return;
 	}
-	const userEvents = await redisClient.get(`user:${userid}`);
+	const userEvents = await redisClient.sMembers(`user:${userid}`);
 	if (userEvents === null) {
 		res.status(200).json([]);
 		return;
@@ -195,6 +215,8 @@ async getSubscribedEvents(req, res) {
 }
 
 async function subscribeToEvent(req, res) {
+    console.log(req.body);
+//     console.log(req);
     let userid = String(req.body.userid);
 	let eventkey = String(req.body.eventkey);
 	console.log(`Token ${userid} subscribing to ${eventkey}`);
@@ -251,6 +273,7 @@ async function unsubscribeFromEvent(req, res) {
 	res.status(200).json({"error":"None"});
 }
 
+
 console.log("Initializing firebase app...");
 const app = admin.initializeApp({
   credential: admin.credential.cert(serviceAccount),
@@ -263,17 +286,24 @@ console.log("Test route password: ", process.env.PASS);
 const db = admin.database();
 const msg = admin.messaging();
 
+if (process.env.EMULATOR === "true") {
+    console.log("Using db emulator...");
+    db.useEmulator("host.docker.internal", 9000);
+}
+
 const events = db.ref("approved");
 
 console.log("Connecting to Redis...")
 const redisClient = redis.createClient({
-    host: 'redis',
-    port: 6379
+    socket: {
+        host: 'redis',
+        port: 6379
+    }
 });
 
 await redisClient.connect();
 
-//create date index
+// create date index
 try {
     await redisClient.ft.create('idx:event', {
         date: {
@@ -281,10 +311,10 @@ try {
         }
     }, {
         ON: "HASH",
-        PREFIX: 'event:'
+        PREFIX: 'event-data:'
     });
 } catch(err) {
-    if (err.message !== "Index already exists ") throw err;
+    if (err.message !== "Index already exists") throw err;
 }
 
 const server = express();
@@ -292,9 +322,15 @@ const port = 3000;
 
 let timeouts = {};
 
-events.orderByChild('date').startAt(Date.now()).on("child_added", newEvent);
-events.on("child_changed", changedEvent);
-events.on("child_removed", removedEvent);
+console.log("Adding Firebase handlers...")
+let now = Date.now();
+
+// console.log(db);
+// console.log(events);
+
+events.orderByChild('date').startAt(now).on("child_added", newEvent);
+events.orderByChild('date').startAt(now).on("child_changed", changedEvent);
+events.orderByChild('date').startAt(now).on("child_removed", removedEvent);
 
 setInterval(setEventAlarms, 1000*60*60); //every hour
 
@@ -302,27 +338,29 @@ server.use(cors());
 
 server.get('/getSubscribedEvents', getSubscribedEvents);
 
-server.post("/subscribeToEvent", bodyparser.json({type: "*/*"}), subscribeToEvent);
+server.post("/subscribeToEvent", express.json({type: "*/*"}), subscribeToEvent);
+// server.post("/subscribeToEvent", subscribeToEvent);
 
-server.post("/unsubscribeFromEvent", bodyparser.json({type: "*/*"}), unsubscribeFromEvent);
+server.post("/unsubscribeFromEvent", express.json({type: "*/*"}), unsubscribeFromEvent);
 
-server.post("/test", bodyparser.json({type: "*/*"}), async (req, res) => {
-	//test endpoint for sending notifications
-	if (req.body.pass !== process.env.PASS) {
-		res.status(404).send("Cannot POST /test");
-		return;
-	}
-	console.log("!!!debug send called for ", req.body.id);
-	const resp = msg.send({
-		notification: {
-			title:"Test",
-			body:"Test message"
-		},
-		token: req.body.id
-	});
-	res.status(200).json(resp);
-}
+//     server.post("/test", bodyparser.json({type: "*/*"}), async (req, res) => {
+//         //test endpoint for sending notifications
+//         if (req.body.pass !== process.env.PASS) {
+//             res.status(404).send("Cannot POST /test");
+//             return;
+//         }
+//         console.log("!!!debug send called for ", req.body.id);
+//         const resp = msg.send({
+//             notification: {
+//                 title:"Test",
+//                 body:"Test message"
+//             },
+//             token: req.body.id
+//         });
+//         res.status(200).json(resp);
+//     });
 
 server.listen(port, () => {
-	console.log(`Notifications server started on port ${port}`);
+    console.log(`Notifications server started on port ${port}`);
 });
+})();
